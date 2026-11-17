@@ -6,6 +6,9 @@
 <title>three.js calculator</title>
 <style>
   html, body { margin:0; height:100%; background:#9db7cc; overflow:hidden; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  #landscape-control { position:fixed; top:16px; left:16px; z-index:1; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:12px; background:#18232de6; color:#fff; font-size:14px; box-shadow:0 2px 12px #0003; }
+  #landscape { font:inherit; padding:6px 10px; border:1px solid #ffffff55; border-radius:6px; background:#fff; color:#18232d; }
+  #landscape:focus-visible { outline:3px solid #ffbd62; outline-offset:3px; }
   #hint { position:fixed; left:0; right:0; bottom:16px; text-align:center; color:#ffffffcc; text-shadow:0 1px 3px #0006; font-size:12px; pointer-events:none; }
 </style>
 <script type="importmap">
@@ -16,6 +19,7 @@
 </script>
 </head>
 <body>
+<div id="landscape-control"><label for="landscape">Landscape</label><select id="landscape"></select></div>
 <div id="hint">Click the keys or use your keyboard (0–9 . + − × ÷ Enter Esc Backspace). Drag to orbit.</div>
 <script type="module">
 import * as THREE from 'three';
@@ -133,37 +137,83 @@ function diamondSquare(n, roughness, seed) {
   return { h, size };
 }
 
-const TERRAIN = { n: 7, size: 140, height: 26, roughness: 0.56, base: -9, water: -6.8 };
-const { h, size: gridN } = diamondSquare(TERRAIN.n, TERRAIN.roughness, 1337);
-let lo = Infinity, hi = -Infinity; for (const v of h) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
-const terrainGeo = new THREE.PlaneGeometry(TERRAIN.size, TERRAIN.size, gridN - 1, gridN - 1);
-const pos = terrainGeo.attributes.position, colors = new Float32Array(pos.count * 3);
-const cWater = new THREE.Color('#c9b98f'), cGrass = new THREE.Color('#5f7f45'), cForest = new THREE.Color('#3f5a35'),
-      cRock = new THREE.Color('#7a7068'), cSnow = new THREE.Color('#f4f6f8'), tmp = new THREE.Color();
-for (let i = 0; i < pos.count; i++) {
-  const x = pos.getX(i), y = pos.getY(i);
-  let t = (h[i] - lo) / (hi - lo);                     // 0..1
-  const d = Math.hypot(x, y) / (TERRAIN.size / 2);
-  const valley = THREE.MathUtils.smoothstep(d, 0.05, 0.45); // carve a valley under the calculator
-  t = Math.pow(t, 1.35) * (0.25 + 0.75 * valley);
-  pos.setZ(i, TERRAIN.base + t * TERRAIN.height);
-  if (t < 0.1) tmp.copy(cWater).lerp(cGrass, t / 0.1);
-  else if (t < 0.32) tmp.copy(cGrass).lerp(cForest, (t - 0.1) / 0.22);
-  else if (t < 0.42) tmp.copy(cForest).lerp(cRock, (t - 0.32) / 0.10);
-  else if (t < 0.5) tmp.copy(cRock).lerp(cSnow, (t - 0.42) / 0.08);
-  else tmp.copy(cSnow);
-  colors.set([tmp.r, tmp.g, tmp.b], i * 3);
-}
-terrainGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-terrainGeo.computeVertexNormals();
+const LANDSCAPES = {
+  mountains: {
+    label: 'Mountains', sky: '#a9c3d6', sun: '#ffffff', water: -6.8, waterColor: '#4d86a8',
+    palette: [[0, '#c9b98f'], [0.1, '#5f7f45'], [0.32, '#3f5a35'], [0.42, '#7a7068'], [0.5, '#f4f6f8']],
+    height(x, y, noise) {
+      const valley = THREE.MathUtils.smoothstep(Math.hypot(x, y) / 70, 0.05, 0.45);
+      return -9 + Math.pow(noise, 1.35) * (0.25 + 0.75 * valley) * 26;
+    },
+    colorLevel: z => (z + 9) / 26
+  },
+  desert: {
+    label: 'Desert', sky: '#e8c49b', sun: '#ffe0ad', water: null, waterColor: '#4d86a8',
+    palette: [[0, '#a65e32'], [0.35, '#cf8c49'], [0.7, '#e8b96d'], [1, '#f7d998']],
+    height(x, y, noise) {
+      const dunes = Math.sin(x * 0.19 + Math.sin(y * 0.07) * 1.8);
+      return -8 + (dunes * 0.5 + 0.5) * 4 + noise * 3;
+    },
+    colorLevel: z => (z + 8) / 7
+  },
+  seaside: {
+    label: 'Seaside', sky: '#a8dce5', sun: '#fff6df', water: -6.4, waterColor: '#239eae',
+    palette: [[0, '#568e88'], [0.25, '#d5bd87'], [0.48, '#f4dfa6'], [0.65, '#80a366'], [1, '#526c47']],
+    height(x, y, noise) {
+      const shore = x + 8 * Math.sin(y * 0.07) - 7;
+      return -6.4 + shore * 0.10 + (noise - 0.45) * 2.2;
+    },
+    colorLevel: z => (z + 7.5) / 5
+  }
+};
+const terrainSize = 140;
+const { h, size: gridN } = diamondSquare(7, 0.56, 1337);
+let lo = Infinity, hi = -Infinity;
+for (const v of h) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+const terrainGeo = new THREE.PlaneGeometry(terrainSize, terrainSize, gridN - 1, gridN - 1);
+const pos = terrainGeo.attributes.position;
+const colors = new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3);
+terrainGeo.setAttribute('color', colors);
 const terrain = new THREE.Mesh(terrainGeo, new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.95 }));
 terrain.receiveShadow = true;
 scene.add(terrain);
-
-const water = new THREE.Mesh(new THREE.PlaneGeometry(TERRAIN.size, TERRAIN.size),
-  new THREE.MeshStandardMaterial({ color: '#4d86a8', roughness: 0.15, metalness: 0.2, transparent: true, opacity: 0.85 }));
-water.position.z = TERRAIN.water; water.receiveShadow = true;
+const water = new THREE.Mesh(new THREE.PlaneGeometry(terrainSize, terrainSize),
+  new THREE.MeshStandardMaterial({ roughness: 0.15, metalness: 0.2, transparent: true, opacity: 0.85 }));
+water.receiveShadow = true;
 scene.add(water);
+
+function setLandscape(id) {
+  const landscape = LANDSCAPES[id];
+  const palette = landscape.palette.map(([level, color]) => [level, new THREE.Color(color)]);
+  const color = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const z = landscape.height(pos.getX(i), pos.getY(i), (h[i] - lo) / (hi - lo));
+    pos.setZ(i, z);
+    const level = THREE.MathUtils.clamp(landscape.colorLevel(z), 0, 1);
+    let upper = palette.findIndex(([stop]) => stop >= level);
+    if (upper < 0) upper = palette.length - 1;
+    const [end, endColor] = palette[upper];
+    const [start, startColor] = palette[Math.max(0, upper - 1)];
+    color.copy(startColor).lerp(endColor, end === start ? 0 : (level - start) / (end - start));
+    colors.setXYZ(i, color.r, color.g, color.b);
+  }
+  pos.needsUpdate = true;
+  colors.needsUpdate = true;
+  terrainGeo.computeVertexNormals();
+  terrainGeo.computeBoundingSphere();
+  scene.background.set(landscape.sky);
+  scene.fog.color.set(landscape.sky);
+  sun.color.set(landscape.sun);
+  water.visible = landscape.water !== null;
+  water.position.z = landscape.water ?? 0;
+  water.material.color.set(landscape.waterColor);
+}
+const landscapeSelect = document.getElementById('landscape');
+for (const [id, landscape] of Object.entries(LANDSCAPES)) {
+  landscapeSelect.add(new Option(landscape.label, id));
+}
+landscapeSelect.addEventListener('change', () => setLandscape(landscapeSelect.value));
+setLandscape(landscapeSelect.value);
 
 // everything belonging to the calculator lives in this floating rig
 const rig = new THREE.Group();
@@ -265,6 +315,7 @@ renderer.domElement.addEventListener('pointerup', e => {
 const KEYMAP = { '*': '×', 'x': '×', '/': '÷', '-': '−', '+': '+', 'Enter': '=', '=': '=',
   'Escape': 'C', 'c': 'C', 'Backspace': '⌫', '%': '%', '.': '.', ',': '.' };
 addEventListener('keydown', e => {
+  if (e.target.closest('select, input, textarea, button, [contenteditable]')) return;
   const label = /^\d$/.test(e.key) ? e.key : KEYMAP[e.key];
   const k = keys.find(k => k.userData.label === label);
   if (k) { e.preventDefault(); press(k); }

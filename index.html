@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>three.js calculator</title>
+<style>
+  html, body { margin:0; height:100%; background:#14171c; overflow:hidden; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  #hint { position:fixed; left:0; right:0; bottom:16px; text-align:center; color:#7d8794; font-size:12px; pointer-events:none; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hint">Click the keys or use your keyboard (0–9 . + − × ÷ Enter Esc Backspace). Drag to orbit.</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// ---------- calculator logic (no eval) ----------
+const calc = {
+  display: '0', acc: null, op: null, fresh: true,
+  apply(a, b, op) {
+    switch (op) {
+      case '+': return a + b;
+      case '−': return a - b;
+      case '×': return a * b;
+      case '÷': return b === 0 ? NaN : a / b;
+    }
+    return b;
+  },
+  format(n) {
+    if (!isFinite(n)) return 'Error';
+    const s = String(+n.toPrecision(12));
+    return s.length > 12 ? n.toExponential(6) : s;
+  },
+  input(k) {
+    if (this.display === 'Error' && k !== 'C') return;
+    if (/^\d$/.test(k)) {
+      if (this.fresh) { this.display = k; this.fresh = false; }
+      else if (this.display.replace(/[-.]/g, '').length < 12) this.display = this.display === '0' ? k : this.display + k;
+    } else if (k === '.') {
+      if (this.fresh) { this.display = '0.'; this.fresh = false; }
+      else if (!this.display.includes('.')) this.display += '.';
+    } else if ('+−×÷'.includes(k)) {
+      const v = parseFloat(this.display);
+      if (this.op && !this.fresh) this.display = this.format(this.apply(this.acc, v, this.op));
+      this.acc = parseFloat(this.display); this.op = k; this.fresh = true;
+    } else if (k === '=') {
+      if (this.op === null) return;
+      this.display = this.format(this.apply(this.acc, parseFloat(this.display), this.op));
+      this.acc = null; this.op = null; this.fresh = true;
+    } else if (k === 'C') {
+      Object.assign(this, { display: '0', acc: null, op: null, fresh: true });
+    } else if (k === '±') {
+      if (this.display !== '0') this.display = this.display.startsWith('-') ? this.display.slice(1) : '-' + this.display;
+    } else if (k === '%') {
+      this.display = this.format(parseFloat(this.display) / 100);
+    } else if (k === '⌫') {
+      if (!this.fresh) this.display = this.display.length > 1 ? this.display.slice(0, -1) : '0';
+      if (this.display === '-') this.display = '0';
+    }
+    drawScreen();
+  }
+};
+window.calc = calc; // handy for testing in the console
+
+// ---------- scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.85;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#14171c');
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.35;
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, -7.5, 12.5);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.minDistance = 8; controls.maxDistance = 25;
+controls.target.set(0, 0.2, 0);
+
+const sun = new THREE.DirectionalLight('#ffffff', 2.2);
+sun.position.set(4, -3, 9); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6 });
+scene.add(sun, new THREE.AmbientLight('#8899aa', 0.4));
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.ShadowMaterial({ opacity: 0.35 }));
+ground.position.z = -0.45; ground.receiveShadow = true;
+scene.add(ground);
+
+// body
+const body = new THREE.Mesh(
+  new RoundedBoxGeometry(5.2, 7.6, 0.6, 6, 0.35),
+  new THREE.MeshStandardMaterial({ color: '#23272e', metalness: 0.4, roughness: 0.45 })
+);
+body.castShadow = true; body.receiveShadow = true;
+scene.add(body);
+
+// screen (canvas texture)
+const sc = document.createElement('canvas'); sc.width = 1024; sc.height = 256;
+const sctx = sc.getContext('2d');
+const screenTex = new THREE.CanvasTexture(sc); screenTex.colorSpace = THREE.SRGBColorSpace;
+const screen = new THREE.Mesh(new THREE.PlaneGeometry(4.5, 1.12),
+  new THREE.MeshBasicMaterial({ map: screenTex }));
+screen.position.set(0, 2.85, 0.31);
+scene.add(screen);
+
+function drawScreen() {
+  const g = sctx.createLinearGradient(0, 0, 0, 256);
+  g.addColorStop(0, '#c9dcc2'); g.addColorStop(1, '#a9c2a0');
+  sctx.fillStyle = g; sctx.fillRect(0, 0, 1024, 256);
+  sctx.fillStyle = '#2b3a2a';
+  sctx.font = '500 58px ui-monospace, Menlo, monospace';
+  sctx.textAlign = 'left';
+  sctx.fillText(calc.op ? `${calc.format(calc.acc)} ${calc.op}` : '', 40, 78);
+  const text = calc.display;
+  let size = 150; sctx.font = `600 ${size}px ui-monospace, Menlo, monospace`;
+  while (sctx.measureText(text).width > 940 && size > 40) { size -= 6; sctx.font = `600 ${size}px ui-monospace, Menlo, monospace`; }
+  sctx.textAlign = 'right';
+  sctx.fillText(text, 984, 220);
+  screenTex.needsUpdate = true;
+}
+
+// keys
+const LAYOUT = [
+  ['C', '±', '%', '÷'],
+  ['7', '8', '9', '×'],
+  ['4', '5', '6', '−'],
+  ['1', '2', '3', '+'],
+  ['0', '.', '⌫', '='],
+];
+const COLORS = { num: '#e8e4dc', op: '#f08a24', fn: '#8e98a3', eq: '#2f9c82' };
+const keyGeo = new RoundedBoxGeometry(1.0, 0.82, 0.35, 4, 0.14);
+const keys = [];
+
+function labelTexture(label, dark) {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const x = c.getContext('2d');
+  x.fillStyle = dark ? '#1b1d21' : '#ffffff';
+  x.font = '600 130px -apple-system, "Segoe UI", sans-serif';
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.fillText(label, 128, 138);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return t;
+}
+
+LAYOUT.forEach((row, r) => row.forEach((label, c) => {
+  const kind = label === '=' ? 'eq' : '+−×÷'.includes(label) ? 'op' : 'C±%⌫'.includes(label) ? 'fn' : 'num';
+  const group = new THREE.Group();
+  const mesh = new THREE.Mesh(keyGeo, new THREE.MeshStandardMaterial({ color: COLORS[kind], roughness: 0.45, metalness: 0.05 }));
+  mesh.castShadow = true;
+  const face = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.8),
+    new THREE.MeshBasicMaterial({ map: labelTexture(label, kind !== 'eq'), transparent: true }));
+  face.position.z = 0.176;
+  group.add(mesh, face);
+  group.position.set(-1.8 + c * 1.2, 1.55 - r * 1.0 - 0.15, 0.45);
+  group.userData = { label, baseZ: 0.45, press: 0, mesh };
+  mesh.userData.key = group; face.userData.key = group;
+  scene.add(group); keys.push(group);
+}));
+
+// ---------- interaction ----------
+const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
+let hovered = null, downAt = null;
+function pick(e) {
+  ptr.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(ptr, camera);
+  const hit = ray.intersectObjects(keys.flatMap(k => k.children))[0];
+  return hit ? hit.object.userData.key : null;
+}
+function press(k) { k.userData.press = 1; calc.input(k.userData.label); }
+
+renderer.domElement.addEventListener('pointermove', e => {
+  hovered = pick(e);
+  renderer.domElement.style.cursor = hovered ? 'pointer' : 'grab';
+});
+renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return; // was a drag
+  const k = pick(e); if (k) press(k);
+});
+
+const KEYMAP = { '*': '×', 'x': '×', '/': '÷', '-': '−', '+': '+', 'Enter': '=', '=': '=',
+  'Escape': 'C', 'c': 'C', 'Backspace': '⌫', '%': '%', '.': '.', ',': '.' };
+addEventListener('keydown', e => {
+  const label = /^\d$/.test(e.key) ? e.key : KEYMAP[e.key];
+  const k = keys.find(k => k.userData.label === label);
+  if (k) { e.preventDefault(); press(k); }
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- loop ----------
+const clock = new THREE.Clock();
+drawScreen();
+renderer.setAnimationLoop(() => {
+  const dt = clock.getDelta();
+  for (const k of keys) {
+    const u = k.userData;
+    u.press = Math.max(0, u.press - dt * 6);
+    const target = u.baseZ - 0.18 * Math.sin(u.press * Math.PI) + (k === hovered ? 0.06 : 0);
+    k.position.z += (target - k.position.z) * Math.min(1, dt * 20);
+    u.mesh.material.emissive.setScalar(k === hovered ? 0.08 : 0);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>three.js calculator</title>
 <style>
-  html, body { margin:0; height:100%; background:#14171c; overflow:hidden; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-  #hint { position:fixed; left:0; right:0; bottom:16px; text-align:center; color:#7d8794; font-size:12px; pointer-events:none; }
+  html, body { margin:0; height:100%; background:#9db7cc; overflow:hidden; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  #hint { position:fixed; left:0; right:0; bottom:16px; text-align:center; color:#ffffffcc; text-shadow:0 1px 3px #0006; font-size:12px; pointer-events:none; }
 </style>
 <script type="importmap">
 { "imports": {
@@ -82,27 +82,93 @@ renderer.toneMappingExposure = 0.85;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color('#14171c');
+const SKY = new THREE.Color('#a9c3d6');
+scene.background = SKY;
+scene.fog = new THREE.Fog(SKY, 40, 120);
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 scene.environmentIntensity = 0.35;
 
 const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 100);
-camera.position.set(0, -7.5, 12.5);
+camera.up.set(0, 0, 1); // world is Z-up: terrain lies in the XY plane
+camera.position.set(0, -21, 8.5);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.minDistance = 8; controls.maxDistance = 25;
-controls.target.set(0, 0.2, 0);
+controls.minDistance = 9; controls.maxDistance = 45;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.target.set(0, 0, 1.5);
 
 const sun = new THREE.DirectionalLight('#ffffff', 2.2);
-sun.position.set(4, -3, 9); sun.castShadow = true;
+sun.position.set(14, -10, 22); sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6 });
+sun.shadow.bias = -0.0005;
+Object.assign(sun.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 80 });
 scene.add(sun, new THREE.AmbientLight('#8899aa', 0.4));
 
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.ShadowMaterial({ opacity: 0.35 }));
-ground.position.z = -0.45; ground.receiveShadow = true;
-scene.add(ground);
+// ---------- fractal mountains (diamond-square) ----------
+function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+function diamondSquare(n, roughness, seed) {
+  const size = (1 << n) + 1, h = new Float32Array(size * size), rnd = mulberry32(seed);
+  const at = (x, y) => h[y * size + x], set = (x, y, v) => { h[y * size + x] = v; };
+  const r = () => rnd() * 2 - 1;
+  [0, size - 1].forEach(x => [0, size - 1].forEach(y => set(x, y, r() * 0.3)));
+  let amp = 1;
+  for (let step = size - 1; step > 1; step >>= 1, amp *= roughness) {
+    const half = step >> 1;
+    for (let y = half; y < size; y += step)            // diamond step
+      for (let x = half; x < size; x += step)
+        set(x, y, (at(x - half, y - half) + at(x + half, y - half) + at(x - half, y + half) + at(x + half, y + half)) / 4 + r() * amp);
+    for (let y = 0; y < size; y += half)               // square step
+      for (let x = (y / half) % 2 === 0 ? half : 0; x < size; x += step) {
+        let sum = 0, cnt = 0;
+        for (const [dx, dy] of [[-half, 0], [half, 0], [0, -half], [0, half]]) {
+          const xx = x + dx, yy = y + dy;
+          if (xx >= 0 && xx < size && yy >= 0 && yy < size) { sum += at(xx, yy); cnt++; }
+        }
+        set(x, y, sum / cnt + r() * amp);
+      }
+  }
+  return { h, size };
+}
+
+const TERRAIN = { n: 7, size: 140, height: 26, roughness: 0.56, base: -9, water: -6.8 };
+const { h, size: gridN } = diamondSquare(TERRAIN.n, TERRAIN.roughness, 1337);
+let lo = Infinity, hi = -Infinity; for (const v of h) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+const terrainGeo = new THREE.PlaneGeometry(TERRAIN.size, TERRAIN.size, gridN - 1, gridN - 1);
+const pos = terrainGeo.attributes.position, colors = new Float32Array(pos.count * 3);
+const cWater = new THREE.Color('#c9b98f'), cGrass = new THREE.Color('#5f7f45'), cForest = new THREE.Color('#3f5a35'),
+      cRock = new THREE.Color('#7a7068'), cSnow = new THREE.Color('#f4f6f8'), tmp = new THREE.Color();
+for (let i = 0; i < pos.count; i++) {
+  const x = pos.getX(i), y = pos.getY(i);
+  let t = (h[i] - lo) / (hi - lo);                     // 0..1
+  const d = Math.hypot(x, y) / (TERRAIN.size / 2);
+  const valley = THREE.MathUtils.smoothstep(d, 0.05, 0.45); // carve a valley under the calculator
+  t = Math.pow(t, 1.35) * (0.25 + 0.75 * valley);
+  pos.setZ(i, TERRAIN.base + t * TERRAIN.height);
+  if (t < 0.1) tmp.copy(cWater).lerp(cGrass, t / 0.1);
+  else if (t < 0.32) tmp.copy(cGrass).lerp(cForest, (t - 0.1) / 0.22);
+  else if (t < 0.42) tmp.copy(cForest).lerp(cRock, (t - 0.32) / 0.10);
+  else if (t < 0.5) tmp.copy(cRock).lerp(cSnow, (t - 0.42) / 0.08);
+  else tmp.copy(cSnow);
+  colors.set([tmp.r, tmp.g, tmp.b], i * 3);
+}
+terrainGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+terrainGeo.computeVertexNormals();
+const terrain = new THREE.Mesh(terrainGeo, new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.95 }));
+terrain.receiveShadow = true;
+scene.add(terrain);
+
+const water = new THREE.Mesh(new THREE.PlaneGeometry(TERRAIN.size, TERRAIN.size),
+  new THREE.MeshStandardMaterial({ color: '#4d86a8', roughness: 0.15, metalness: 0.2, transparent: true, opacity: 0.85 }));
+water.position.z = TERRAIN.water; water.receiveShadow = true;
+scene.add(water);
+
+// everything belonging to the calculator lives in this floating rig
+const rig = new THREE.Group();
+rig.rotation.x = 0.55;               // tilt the face toward the camera
+scene.add(rig);
 
 // body
 const body = new THREE.Mesh(
@@ -110,7 +176,7 @@ const body = new THREE.Mesh(
   new THREE.MeshStandardMaterial({ color: '#23272e', metalness: 0.4, roughness: 0.45 })
 );
 body.castShadow = true; body.receiveShadow = true;
-scene.add(body);
+rig.add(body);
 
 // screen (canvas texture)
 const sc = document.createElement('canvas'); sc.width = 1024; sc.height = 256;
@@ -119,7 +185,7 @@ const screenTex = new THREE.CanvasTexture(sc); screenTex.colorSpace = THREE.SRGB
 const screen = new THREE.Mesh(new THREE.PlaneGeometry(4.5, 1.12),
   new THREE.MeshBasicMaterial({ map: screenTex }));
 screen.position.set(0, 2.85, 0.31);
-scene.add(screen);
+rig.add(screen);
 
 function drawScreen() {
   const g = sctx.createLinearGradient(0, 0, 0, 256);
@@ -172,7 +238,7 @@ LAYOUT.forEach((row, r) => row.forEach((label, c) => {
   group.position.set(-1.8 + c * 1.2, 1.55 - r * 1.0 - 0.15, 0.45);
   group.userData = { label, baseZ: 0.45, press: 0, mesh };
   mesh.userData.key = group; face.userData.key = group;
-  scene.add(group); keys.push(group);
+  rig.add(group); keys.push(group);
 }));
 
 // ---------- interaction ----------
@@ -221,6 +287,10 @@ renderer.setAnimationLoop(() => {
     k.position.z += (target - k.position.z) * Math.min(1, dt * 20);
     u.mesh.material.emissive.setScalar(k === hovered ? 0.08 : 0);
   }
+  const t = clock.elapsedTime;
+  rig.position.z = 1.5 + Math.sin(t * 1.1) * 0.25;   // float
+  rig.rotation.z = Math.sin(t * 0.4) * 0.06;
+  rig.rotation.y = Math.sin(t * 0.7) * 0.03;
   controls.update();
   renderer.render(scene, camera);
 });
